@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">액션노치</string>
+    <string name="accessibility_label">액션노치</string>
+    <string name="accessibility_description">노치(펀치홀) 영역에 터치 제스처를 인식해 손전등, 전원 메뉴, 스크린샷 등의 동작을 실행합니다. 화면 내용은 \"맨 위로 스크롤\" 동작에만 사용되며 어디에도 전송되지 않습니다.</string>
+    <string name="accessibility_summary">노치 터치로 빠른 동작 실행</string>
+</resources>

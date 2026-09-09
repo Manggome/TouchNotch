@@ -1,0 +1,7 @@
+# 저장소에는 항상 LF 로 저장한다 (리눅스 CI 에서 gradlew 가 깨지지 않도록)
+* text=auto eol=lf
+*.jar binary
+*.jks binary
+*.keystore binary
+*.png binary
+*.apk binary
