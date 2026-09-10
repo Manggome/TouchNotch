@@ -6,7 +6,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.net.Uri
+import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
@@ -25,11 +27,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Accessibility
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Gesture
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Warning
@@ -71,6 +74,8 @@ import kr.manggome.touchnotch.model.FoldState
 import kr.manggome.touchnotch.model.Gesture as NotchGesture
 import kr.manggome.touchnotch.model.NotchAction
 import kr.manggome.touchnotch.model.NotchProfile
+import kr.manggome.touchnotch.model.Orientation
+import kr.manggome.touchnotch.model.ScreenProfileKey
 import kr.manggome.touchnotch.service.NotchAccessibilityService
 import kr.manggome.touchnotch.service.NotchAccessibilityService.Companion.MAX_HEIGHT_DP
 import kr.manggome.touchnotch.service.NotchAccessibilityService.Companion.MAX_VERTICAL_DP
@@ -109,18 +114,34 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // ---- 지금 화면 상태 ----
     var threshold by remember { mutableIntStateOf(store.foldThresholdDp) }
     val smallestWidthDp = configuration.smallestScreenWidthDp
     val currentFold =
         if (smallestWidthDp >= threshold) FoldState.UNFOLDED else FoldState.FOLDED
+    val currentOrientation =
+        if (configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
+            Orientation.LANDSCAPE
+        } else {
+            Orientation.PORTRAIT
+        }
+    val currentKey = ScreenProfileKey(currentFold, currentOrientation)
 
-    var selected by remember { mutableStateOf(currentFold) }
-    LaunchedEffect(currentFold) { selected = currentFold }
+    // ---- 편집 중인 프로필 ----
+    var selectedFold by remember { mutableStateOf(currentFold) }
+    var selectedOrientation by remember { mutableStateOf(currentOrientation) }
+    LaunchedEffect(currentKey) {
+        selectedFold = currentKey.fold
+        selectedOrientation = currentKey.orientation
+    }
+    val selected = ScreenProfileKey(selectedFold, selectedOrientation)
+    val isCurrent = selected == currentKey
 
     var editing by remember { mutableStateOf(false) }
     LaunchedEffect(editing, selected, serviceRunning) {
         NotchAccessibilityService.instance?.setEditTarget(if (editing) selected else null)
     }
+    LaunchedEffect(isCurrent) { if (!isCurrent) editing = false }
     DisposableEffect(Unit) {
         onDispose { NotchAccessibilityService.instance?.setEditTarget(null) }
     }
@@ -134,14 +155,20 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
     }
 
     var cutoutText by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(serviceRunning, refreshTick, smallestWidthDp) {
+    LaunchedEffect(serviceRunning, refreshTick, currentKey) {
         val cutout = NotchAccessibilityService.instance?.detectCutout()
         cutoutText = cutout?.let {
             val w = (it.widthPx / it.density).toInt()
             val h = (it.heightPx / it.density).toInt()
-            "감지됨 · ${w}×${h}dp · 화면 상단 ${(it.topPx / it.density).toInt()}dp 지점"
+            val left = (it.leftPx / it.density).toInt()
+            val top = (it.topPx / it.density).toInt()
+            "감지됨 · ${w}×${h}dp · 왼쪽에서 ${left}dp, 위에서 ${top}dp"
         }
     }
+
+    // 가로 모드에서는 화면 높이가 짧아서 수직 슬라이더 범위를 화면에 맞춰야 쓸 수 있다
+    val maxVerticalDp =
+        if (isCurrent) configuration.screenHeightDp.coerceAtLeast(120) else MAX_VERTICAL_DP
 
     Column(
         Modifier
@@ -179,11 +206,12 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
             // ---------- 2. 현재 화면 상태 ----------
             SectionCard(
                 title = "현재 화면",
-                subtitle = "폴드 상태에 따라 설정이 자동으로 바뀝니다",
+                subtitle = "폴드 상태와 화면 방향에 따라 설정이 자동으로 바뀝니다",
                 icon = Icons.Filled.PhoneAndroid,
             ) {
-                InfoRow("지금 상태", currentFold.label)
+                InfoRow("지금 상태", currentKey.label)
                 InfoRow("화면 최소 너비", "${smallestWidthDp}dp")
+                InfoRow("화면 크기", "${configuration.screenWidthDp} × ${configuration.screenHeightDp}dp")
                 Spacer(Modifier.height(6.dp))
                 IntSlider(
                     label = "펼침 판정 기준",
@@ -196,29 +224,52 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
                     },
                 )
                 Text(
-                    "지금 화면의 최소 너비(${smallestWidthDp}dp)가 기준값보다 크면 ‘펼쳤을 때’ 설정을 씁니다. " +
-                        "접었을 때와 펼쳤을 때 각각 이 화면을 열어 값을 확인하면 정확한 기준을 찾을 수 있어요.",
+                    "화면 최소 너비(${smallestWidthDp}dp)가 기준값보다 크면 ‘펼쳤을 때’ 설정을 씁니다. " +
+                        "접었을 때와 펼쳤을 때 각각 이 값을 확인하면 정확한 기준을 찾을 수 있어요.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
             // ---------- 3. 프로필 선택 ----------
+            Text(
+                "설정할 화면",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                FoldState.entries.forEachIndexed { index, state ->
+                FoldState.entries.forEachIndexed { index, fold ->
                     SegmentedButton(
-                        selected = selected == state,
-                        onClick = { selected = state },
+                        selected = selectedFold == fold,
+                        onClick = { selectedFold = fold },
                         shape = SegmentedButtonDefaults.itemShape(index, FoldState.entries.size),
                         label = {
                             Text(
-                                if (state == currentFold) "${state.shortLabel} ●" else state.shortLabel
+                                if (fold == currentFold) "${fold.shortLabel} ●" else fold.shortLabel
                             )
                         },
                     )
                 }
             }
-            if (selected != currentFold) {
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                Orientation.entries.forEachIndexed { index, orientation ->
+                    SegmentedButton(
+                        selected = selectedOrientation == orientation,
+                        onClick = { selectedOrientation = orientation },
+                        shape = SegmentedButtonDefaults.itemShape(index, Orientation.entries.size),
+                        label = {
+                            Text(
+                                if (orientation == currentOrientation) {
+                                    "${orientation.shortLabel} ●"
+                                } else {
+                                    orientation.shortLabel
+                                }
+                            )
+                        },
+                    )
+                }
+            }
+            if (!isCurrent) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         Icons.Filled.Info,
@@ -228,7 +279,8 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        "지금은 ‘${currentFold.shortLabel}’ 상태예요. 크기·위치는 해당 화면에서 조정하면 정확합니다.",
+                        "지금은 ‘${currentKey.shortLabel}’ 상태입니다. 크기·위치는 해당 화면으로 바꾼 뒤 조정하면 정확합니다. " +
+                            "동작 설정은 지금도 바꿀 수 있어요.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -242,7 +294,8 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
                 icon = Icons.Filled.CenterFocusStrong,
             ) {
                 Text(
-                    cutoutText ?: "이 화면에서 노치(펀치홀)를 자동으로 찾지 못했습니다. 아래 ‘위치 직접 조정’으로 맞춰주세요.",
+                    cutoutText
+                        ?: "이 화면에서 노치(펀치홀)를 자동으로 찾지 못했습니다. 아래 ‘위치 직접 조정’으로 맞춰주세요.",
                     style = MaterialTheme.typography.bodySmall,
                     color = if (cutoutText != null) {
                         MaterialTheme.colorScheme.onSurfaceVariant
@@ -254,20 +307,20 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilledTonalButton(
                         onClick = {
-                            val service = NotchAccessibilityService.instance
-                            val ok = service?.autoFitToCutout(selected) == true
+                            val ok = NotchAccessibilityService.instance
+                                ?.autoFitToCutout(selected) == true
                             context.toast(
                                 if (ok) "노치 위치에 맞췄습니다" else "노치를 자동으로 찾지 못했습니다"
                             )
                             refreshTick += 1
                         },
-                        enabled = serviceRunning && selected == currentFold,
+                        enabled = serviceRunning && isCurrent,
                         modifier = Modifier.weight(1f),
                     ) { Text("자동으로 맞추기") }
 
                     OutlinedButton(
                         onClick = { editing = !editing },
-                        enabled = serviceRunning && selected == currentFold,
+                        enabled = serviceRunning && isCurrent,
                         modifier = Modifier.weight(1f),
                     ) { Text(if (editing) "조정 끝내기" else "위치 직접 조정") }
                 }
@@ -293,7 +346,7 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
             // ---------- 5. 터치 영역 ----------
             SectionCard(
                 title = "터치 영역",
-                subtitle = "${selected.shortLabel} 설정",
+                subtitle = selected.label,
                 icon = Icons.Filled.Tune,
             ) {
                 SwitchRow(
@@ -331,10 +384,18 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
                 IntSlider(
                     label = "수직 위치",
                     value = profile.verticalDp,
-                    range = 0..MAX_VERTICAL_DP,
+                    range = 0..maxVerticalDp,
                     valueText = "위에서 ${profile.verticalDp}dp",
                     onValueChange = { v -> update { it.copy(verticalDp = v) } },
                 )
+                if (selectedOrientation == Orientation.LANDSCAPE) {
+                    Text(
+                        "가로 모드에서는 노치가 화면 옆쪽에 오므로 세로로 긴 영역이 됩니다. " +
+                            "수평 위치를 왼쪽/오른쪽 끝(±100%)에 붙이고 수직 위치로 높이를 맞춰주세요.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
                 SwitchRow(
                     title = "촉각 피드백",
@@ -342,7 +403,9 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
                     checked = profile.haptic,
                     onCheckedChange = { checked ->
                         update { it.copy(haptic = checked) }
-                        if (checked) NotchAccessibilityService.instance?.previewHaptic(profile.hapticMs)
+                        if (checked) {
+                            NotchAccessibilityService.instance?.previewHaptic(profile.hapticMs)
+                        }
                     },
                 )
                 if (profile.haptic) {
@@ -353,7 +416,8 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
                         valueText = "${profile.hapticMs}ms",
                         onValueChange = { v -> update { it.copy(hapticMs = v) } },
                         onReleased = {
-                            NotchAccessibilityService.instance?.previewHaptic(profileState.value.hapticMs)
+                            NotchAccessibilityService.instance
+                                ?.previewHaptic(profileState.value.hapticMs)
                         },
                     )
                 }
@@ -368,7 +432,7 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
             // ---------- 6. 제스처 → 동작 ----------
             SectionCard(
                 title = "제스처 동작",
-                subtitle = "${selected.shortLabel} 설정",
+                subtitle = selected.label,
                 icon = Icons.Filled.Gesture,
             ) {
                 NotchGesture.entries.forEach { gesture ->
@@ -388,25 +452,65 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Spacer(Modifier.height(6.dp))
+                OutlinedButton(
+                    onClick = {
+                        store.copyActionsToOthers(selected)
+                        context.toast("나머지 3개 화면에도 같은 동작을 적용했습니다")
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("이 동작 설정을 나머지 화면에도 적용") }
             }
 
-            // ---------- 7. 권한 ----------
+            // ---------- 7. 재부팅 ----------
+            SectionCard(
+                title = "재부팅 후 자동 실행",
+                icon = Icons.Filled.RestartAlt,
+            ) {
+                Text(
+                    "접근성 서비스를 한 번 켜두면 재부팅해도 안드로이드가 알아서 다시 켜줍니다. " +
+                        "앱이 직접 켜는 것은 시스템이 허용하지 않습니다.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "다만 삼성 절전·미사용 앱 관리가 서비스를 끄는 경우가 있어, 부팅 후 확인해서 " +
+                        "꺼져 있으면 알림으로 알려드립니다. 아래 ‘배터리 사용량 최적화 제외’를 켜두면 " +
+                        "꺼질 확률이 크게 줄어듭니다.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(6.dp))
+                SwitchRow(
+                    title = "꺼져 있으면 알림으로 알리기",
+                    checked = remember(refreshTick) { store.notifyIfNotRunning },
+                    onCheckedChange = {
+                        store.notifyIfNotRunning = it
+                        refreshTick += 1
+                    },
+                )
+            }
+
+            // ---------- 8. 권한 ----------
             PermissionsCard(
                 refreshTick = refreshTick,
                 store = store,
                 onRequestRuntimePermissions = onRequestRuntimePermissions,
             )
 
-            // ---------- 8. 업데이트 ----------
+            // ---------- 9. 업데이트 ----------
             UpdateCard(store = store)
 
-            // ---------- 9. 도움말 ----------
+            // ---------- 10. 도움말 ----------
             SectionCard(
                 title = "알아두면 좋아요",
                 icon = Icons.Filled.Info,
             ) {
                 listOf(
                     "노치 영역을 너무 크게 잡으면 상태바를 내리기 어려워집니다. 실제 펀치홀보다 살짝 크게만 잡아주세요.",
+                    "설정은 접었을 때/펼쳤을 때 × 세로/가로 = 4가지로 나뉘어 저장됩니다.",
+                    "가로 모드는 왼쪽으로 돌릴 때와 오른쪽으로 돌릴 때 노치가 반대편에 옵니다. 한쪽 방향으로만 쓰는 것을 기준으로 맞춰주세요.",
                     "‘화면 녹화’와 ‘카메라’는 백그라운드에서 화면을 띄워야 하므로 ‘다른 앱 위에 표시’ 권한이 필요합니다.",
                     "‘소리/진동 토글’은 ‘방해 금지 접근’ 권한이 필요합니다.",
                     "‘맨 위로 스크롤’은 현재 화면에서 가장 큰 스크롤 영역을 위로 올립니다.",
@@ -445,7 +549,11 @@ private fun ServiceStatusCard(running: Boolean, onOpenSettings: () -> Unit) {
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(14.dp),
         ) {
-            Icon(Icons.Filled.Accessibility, contentDescription = null, modifier = Modifier.size(18.dp))
+            Icon(
+                Icons.Filled.Accessibility,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+            )
             Spacer(Modifier.width(8.dp))
             Text(if (running) "접근성 설정 열기" else "접근성 설정에서 켜기")
         }
@@ -467,8 +575,16 @@ private fun PermissionsCard(
     val installGranted = remember(refreshTick) {
         context.packageManager.canRequestPackageInstalls()
     }
-    val notifyGranted = remember(refreshTick) { context.hasPermission(Manifest.permission.POST_NOTIFICATIONS) }
-    val micGranted = remember(refreshTick) { context.hasPermission(Manifest.permission.RECORD_AUDIO) }
+    val notifyGranted = remember(refreshTick) {
+        context.hasPermission(Manifest.permission.POST_NOTIFICATIONS)
+    }
+    val micGranted = remember(refreshTick) {
+        context.hasPermission(Manifest.permission.RECORD_AUDIO)
+    }
+    val batteryExempt = remember(refreshTick) {
+        context.getSystemService(PowerManager::class.java)
+            ?.isIgnoringBatteryOptimizations(context.packageName) == true
+    }
     var recordAudio by remember { mutableStateOf(store.recordAudio) }
 
     SectionCard(
@@ -476,6 +592,17 @@ private fun PermissionsCard(
         subtitle = "필요한 동작에만 켜주세요",
         icon = Icons.Filled.Shield,
     ) {
+        PermissionRow(
+            title = "배터리 사용량 최적화 제외",
+            hint = "절전 기능이 서비스를 끄지 않게 함",
+            granted = batteryExempt,
+            onClick = {
+                context.openSettings(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:${context.packageName}"),
+                )
+            },
+        )
         PermissionRow(
             title = "방해 금지 접근",
             hint = "소리/진동 토글에 필요",
@@ -506,7 +633,7 @@ private fun PermissionsCard(
         )
         PermissionRow(
             title = "알림",
-            hint = "화면 녹화 중 알림 표시",
+            hint = "화면 녹화 · 서비스 꺼짐 알림",
             granted = notifyGranted,
             onClick = onRequestRuntimePermissions,
         )
@@ -561,12 +688,12 @@ private fun PermissionRow(
 @Composable
 private fun rememberProfile(
     store: SettingsStore,
-    state: FoldState,
+    key: ScreenProfileKey,
 ): androidx.compose.runtime.MutableState<NotchProfile> {
-    val profileState = remember(state) { mutableStateOf(store.profile(state)) }
-    DisposableEffect(state) {
+    val profileState = remember(key) { mutableStateOf(store.profile(key)) }
+    DisposableEffect(key) {
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
-            profileState.value = store.profile(state)
+            profileState.value = store.profile(key)
         }
         store.registerListener(listener)
         onDispose { store.unregisterListener(listener) }
@@ -591,4 +718,3 @@ internal fun Context.toast(message: String) {
 
 internal fun Context.hasPermission(permission: String): Boolean =
     ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
-

@@ -20,19 +20,22 @@ import android.view.accessibility.AccessibilityEvent
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.math.roundToInt
 import kr.manggome.touchnotch.action.ActionExecutor
-import kr.manggome.touchnotch.data.FoldDetector
+import kr.manggome.touchnotch.boot.ServiceStatusNotifier
+import kr.manggome.touchnotch.data.ScreenDetector
 import kr.manggome.touchnotch.data.SettingsStore
 import kr.manggome.touchnotch.model.DetectedCutout
-import kr.manggome.touchnotch.model.FoldState
 import kr.manggome.touchnotch.model.Gesture
 import kr.manggome.touchnotch.model.NotchAction
 import kr.manggome.touchnotch.model.NotchProfile
+import kr.manggome.touchnotch.model.ScreenProfileKey
 
 /**
  * 노치 영역 오버레이를 띄우고 제스처를 처리하는 접근성 서비스.
  *
  * 접근성 서비스는 TYPE_ACCESSIBILITY_OVERLAY 윈도우를 쓸 수 있어서
  * '다른 앱 위에 표시' 권한 없이도 화면 위에 터치 영역을 올릴 수 있다.
+ *
+ * 사용자가 접근성 설정에서 켜두면 재부팅 후에도 시스템이 자동으로 다시 연결해준다.
  */
 class NotchAccessibilityService : AccessibilityService(), NotchTouchView.Callbacks {
 
@@ -47,7 +50,7 @@ class NotchAccessibilityService : AccessibilityService(), NotchTouchView.Callbac
     private var currentProfile: NotchProfile? = null
 
     /** 편집(내 노치 찾기) 모드 대상 — null 이면 편집 중 아님 */
-    private var editTarget: FoldState? = null
+    private var editTarget: ScreenProfileKey? = null
 
     private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
         handler.post { applyProfile() }
@@ -62,6 +65,8 @@ class NotchAccessibilityService : AccessibilityService(), NotchTouchView.Callbac
         executor = ActionExecutor(this, store)
         vibrator = resolveVibrator()
         store.registerListener(prefListener)
+        store.lastConnectedAt = System.currentTimeMillis()
+        ServiceStatusNotifier.cancel(this)
         instance = this
         notifyStateChanged()
         applyProfile()
@@ -90,7 +95,7 @@ class NotchAccessibilityService : AccessibilityService(), NotchTouchView.Callbac
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        // 폴드 펼침/접힘, 회전, 화면 크기 변경 모두 여기로 들어온다
+        // 폴드 펼침/접힘, 화면 회전, 화면 크기 변경 모두 여기로 들어온다
         handler.post {
             applyProfile()
             notifyStateChanged()
@@ -103,15 +108,15 @@ class NotchAccessibilityService : AccessibilityService(), NotchTouchView.Callbac
 
     // ---------------- 오버레이 ----------------
 
-    fun currentFoldState(): FoldState = FoldDetector.detect(this, store)
+    fun currentScreenKey(): ScreenProfileKey = ScreenDetector.screenKey(this, store)
 
     private fun applyProfile() {
         if (!::store.isInitialized) return
-        val foldState = currentFoldState()
-        val profile = store.profile(foldState)
+        val screenKey = currentScreenKey()
+        val profile = store.profile(screenKey)
         currentProfile = profile
 
-        val editing = editTarget == foldState
+        val editing = editTarget == screenKey
         if (!profile.enabled && !editing) {
             removeOverlay()
             return
@@ -119,9 +124,12 @@ class NotchAccessibilityService : AccessibilityService(), NotchTouchView.Callbac
 
         val bounds = displayBounds()
         val density = resources.displayMetrics.density
-        val widthPx = (profile.widthDp * density).roundToInt().coerceAtLeast(1)
-        val heightPx = (profile.heightDp * density).roundToInt().coerceAtLeast(1)
+        val widthPx = (profile.widthDp * density).roundToInt()
+            .coerceIn(1, bounds.width().coerceAtLeast(1))
+        val heightPx = (profile.heightDp * density).roundToInt()
+            .coerceIn(1, bounds.height().coerceAtLeast(1))
         val yPx = (profile.verticalDp * density).roundToInt()
+            .coerceIn(0, (bounds.height() - heightPx).coerceAtLeast(0))
         val xPx = horizontalOffsetPx(profile.horizontalPercent, bounds.width(), widthPx)
 
         val params = layoutParams ?: newLayoutParams().also { layoutParams = it }
@@ -218,8 +226,8 @@ class NotchAccessibilityService : AccessibilityService(), NotchTouchView.Callbac
     // ---------------- 액티비티에서 호출하는 명령 ----------------
 
     /** 편집 모드 설정. null 이면 편집 종료 */
-    fun setEditTarget(state: FoldState?) {
-        editTarget = state
+    fun setEditTarget(key: ScreenProfileKey?) {
+        editTarget = key
         handler.post { applyProfile() }
     }
 
@@ -231,9 +239,8 @@ class NotchAccessibilityService : AccessibilityService(), NotchTouchView.Callbac
             getSystemService(DisplayManager::class.java)?.getDisplay(Display.DEFAULT_DISPLAY)
         }.getOrNull() ?: return null
         val cutout = display.cutout ?: return null
-        val rect = cutout.boundingRectTop.takeIf { !it.isEmpty }
-            ?: cutout.boundingRects.firstOrNull { !it.isEmpty }
-            ?: return null
+        // 화면을 돌리면 컷아웃도 회전된 좌표로 보고되므로, 방향별로 그대로 쓰면 된다.
+        val rect = cutout.boundingRects.firstOrNull { !it.isEmpty } ?: return null
         val bounds = displayBounds()
         return DetectedCutout(
             leftPx = rect.left,
@@ -250,7 +257,7 @@ class NotchAccessibilityService : AccessibilityService(), NotchTouchView.Callbac
      * 감지한 컷아웃에 맞춰 해당 프로필의 크기/위치를 자동 설정한다.
      * @return 감지 성공 여부
      */
-    fun autoFitToCutout(state: FoldState, paddingDp: Int = 6): Boolean {
+    fun autoFitToCutout(key: ScreenProfileKey, paddingDp: Int = 6): Boolean {
         val cutout = detectCutout() ?: return false
         val density = cutout.density
         val widthDp = ((cutout.widthPx / density).roundToInt() + paddingDp * 2)
@@ -266,7 +273,7 @@ class NotchAccessibilityService : AccessibilityService(), NotchTouchView.Callbac
             .coerceIn(0, MAX_VERTICAL_DP)
 
         store.save(
-            store.profile(state).copy(
+            store.profile(key).copy(
                 widthDp = widthDp,
                 heightDp = heightDp,
                 horizontalPercent = percent,
@@ -286,8 +293,8 @@ class NotchAccessibilityService : AccessibilityService(), NotchTouchView.Callbac
         const val MIN_WIDTH_DP = 24
         const val MAX_WIDTH_DP = 320
         const val MIN_HEIGHT_DP = 12
-        const val MAX_HEIGHT_DP = 140
-        const val MAX_VERTICAL_DP = 240
+        const val MAX_HEIGHT_DP = 320
+        const val MAX_VERTICAL_DP = 900
 
         @Volatile
         var instance: NotchAccessibilityService? = null
