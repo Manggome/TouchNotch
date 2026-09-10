@@ -6,8 +6,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
-import android.content.res.Configuration
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
@@ -69,13 +70,14 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import kr.manggome.touchnotch.data.ScreenDetector
 import kr.manggome.touchnotch.data.SettingsStore
 import kr.manggome.touchnotch.model.FoldState
 import kr.manggome.touchnotch.model.Gesture as NotchGesture
 import kr.manggome.touchnotch.model.NotchAction
 import kr.manggome.touchnotch.model.NotchProfile
-import kr.manggome.touchnotch.model.Orientation
 import kr.manggome.touchnotch.model.ScreenProfileKey
+import kr.manggome.touchnotch.model.ScreenRotation
 import kr.manggome.touchnotch.service.NotchAccessibilityService
 import kr.manggome.touchnotch.service.NotchAccessibilityService.Companion.MAX_HEIGHT_DP
 import kr.manggome.touchnotch.service.NotchAccessibilityService.Companion.MAX_VERTICAL_DP
@@ -119,22 +121,29 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
     val smallestWidthDp = configuration.smallestScreenWidthDp
     val currentFold =
         if (smallestWidthDp >= threshold) FoldState.UNFOLDED else FoldState.FOLDED
-    val currentOrientation =
-        if (configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
-            Orientation.LANDSCAPE
-        } else {
-            Orientation.PORTRAIT
+    // 회전 정보는 Configuration 에 없다. 게다가 0°↔180° 는 화면 크기까지 같아서
+    // 재구성이 아예 일어나지 않으므로 디스플레이 변화를 직접 관찰해야 한다.
+    var currentRotation by remember { mutableStateOf(ScreenDetector.rotation(context)) }
+    DisposableEffect(context) {
+        val stop = ScreenDetector.observeDisplayChanges(context, Handler(Looper.getMainLooper())) {
+            currentRotation = ScreenDetector.rotation(context)
         }
-    val currentKey = ScreenProfileKey(currentFold, currentOrientation)
+        onDispose { stop() }
+    }
+    LaunchedEffect(configuration, refreshTick) {
+        currentRotation = ScreenDetector.rotation(context)
+    }
+
+    val currentKey = ScreenProfileKey(currentFold, currentRotation)
 
     // ---- 편집 중인 프로필 ----
     var selectedFold by remember { mutableStateOf(currentFold) }
-    var selectedOrientation by remember { mutableStateOf(currentOrientation) }
+    var selectedRotation by remember { mutableStateOf(currentRotation) }
     LaunchedEffect(currentKey) {
         selectedFold = currentKey.fold
-        selectedOrientation = currentKey.orientation
+        selectedRotation = currentKey.rotation
     }
-    val selected = ScreenProfileKey(selectedFold, selectedOrientation)
+    val selected = ScreenProfileKey(selectedFold, selectedRotation)
     val isCurrent = selected == currentKey
 
     var editing by remember { mutableStateOf(false) }
@@ -162,7 +171,7 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
             val h = (it.heightPx / it.density).toInt()
             val left = (it.leftPx / it.density).toInt()
             val top = (it.topPx / it.density).toInt()
-            "감지됨 · ${w}×${h}dp · 왼쪽에서 ${left}dp, 위에서 ${top}dp"
+            "감지됨 · 화면 ${it.side} · ${w}×${h}dp · 왼쪽에서 ${left}dp, 위에서 ${top}dp"
         }
     }
 
@@ -237,6 +246,12 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
             )
+            Text(
+                "기기를 접거나 펴거나 돌리면 ● 표시가 따라옵니다. 맞추고 싶은 방향으로 돌린 뒤 " +
+                    "● 가 붙은 항목을 조정하는 게 가장 쉽습니다.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                 FoldState.entries.forEachIndexed { index, fold ->
                     SegmentedButton(
@@ -252,23 +267,32 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
                 }
             }
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                Orientation.entries.forEachIndexed { index, orientation ->
+                ScreenRotation.entries.forEachIndexed { index, rotation ->
                     SegmentedButton(
-                        selected = selectedOrientation == orientation,
-                        onClick = { selectedOrientation = orientation },
-                        shape = SegmentedButtonDefaults.itemShape(index, Orientation.entries.size),
+                        selected = selectedRotation == rotation,
+                        onClick = { selectedRotation = rotation },
+                        shape = SegmentedButtonDefaults.itemShape(
+                            index,
+                            ScreenRotation.entries.size,
+                        ),
                         label = {
                             Text(
-                                if (orientation == currentOrientation) {
-                                    "${orientation.shortLabel} ●"
+                                if (rotation == currentRotation) {
+                                    "${rotation.shortLabel} ●"
                                 } else {
-                                    orientation.shortLabel
+                                    rotation.shortLabel
                                 }
                             )
                         },
                     )
                 }
             }
+            Text(
+                "선택: ${selected.label}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Medium,
+            )
             if (!isCurrent) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
@@ -381,16 +405,18 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
                     },
                     onValueChange = { v -> update { it.copy(horizontalPercent = v) } },
                 )
+                // 180° 기본값은 '화면 아래에 붙이기' 용도의 큰 수라서, 보여줄 때는 화면 범위로 줄인다
+                val shownVertical = profile.verticalDp.coerceIn(0, maxVerticalDp)
                 IntSlider(
                     label = "수직 위치",
-                    value = profile.verticalDp,
+                    value = shownVertical,
                     range = 0..maxVerticalDp,
-                    valueText = "위에서 ${profile.verticalDp}dp",
+                    valueText = "위에서 ${shownVertical}dp",
                     onValueChange = { v -> update { it.copy(verticalDp = v) } },
                 )
-                if (selectedOrientation == Orientation.LANDSCAPE) {
+                if (selectedRotation.isLandscape) {
                     Text(
-                        "가로 모드에서는 노치가 화면 옆쪽에 오므로 세로로 긴 영역이 됩니다. " +
+                        "가로에서는 노치가 화면 옆쪽에 오므로 세로로 긴 영역이 됩니다. " +
                             "수평 위치를 왼쪽/오른쪽 끝(±100%)에 붙이고 수직 위치로 높이를 맞춰주세요.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -424,8 +450,17 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
                 Spacer(Modifier.height(6.dp))
                 TextButton(onClick = {
                     store.resetProfile(selected)
+                    // 지금 이 화면이면 노치 위치도 다시 자동으로 찾아준다
+                    val refitted = isCurrent &&
+                        NotchAccessibilityService.instance?.autoFitToCutout(selected) == true
                     profileState.value = store.profile(selected)
-                    context.toast("${selected.shortLabel} 설정을 초기화했습니다")
+                    context.toast(
+                        if (refitted) {
+                            "${selected.shortLabel} 설정을 초기화하고 노치에 맞췄습니다"
+                        } else {
+                            "${selected.shortLabel} 설정을 초기화했습니다"
+                        }
+                    )
                 }) { Text("이 화면 설정 초기화") }
             }
 
@@ -456,10 +491,10 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
                 OutlinedButton(
                     onClick = {
                         store.copyActionsToOthers(selected)
-                        context.toast("나머지 3개 화면에도 같은 동작을 적용했습니다")
+                        context.toast("나머지 7개 화면에도 같은 동작을 적용했습니다")
                     },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("이 동작 설정을 나머지 화면에도 적용") }
+                ) { Text("이 동작 설정을 나머지 7개 화면에도 적용") }
             }
 
             // ---------- 7. 재부팅 ----------
@@ -509,8 +544,9 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
             ) {
                 listOf(
                     "노치 영역을 너무 크게 잡으면 상태바를 내리기 어려워집니다. 실제 펀치홀보다 살짝 크게만 잡아주세요.",
-                    "설정은 접었을 때/펼쳤을 때 × 세로/가로 = 4가지로 나뉘어 저장됩니다.",
-                    "가로 모드는 왼쪽으로 돌릴 때와 오른쪽으로 돌릴 때 노치가 반대편에 옵니다. 한쪽 방향으로만 쓰는 것을 기준으로 맞춰주세요.",
+                    "설정은 접었을 때/펼쳤을 때 × 회전 4방향 = 8가지로 나뉘어 저장됩니다.",
+                    "회전할 때마다 노치가 화면의 다른 변으로 갑니다. 0°는 위, 180°는 아래, 90°와 270°는 각각 반대쪽 옆입니다.",
+                    "새 방향으로 처음 돌리면 노치 위치를 자동으로 찾아 맞춥니다. 자동 감지가 안 되면 ‘위치 직접 조정’으로 끌어주세요.",
                     "‘화면 녹화’와 ‘카메라’는 백그라운드에서 화면을 띄워야 하므로 ‘다른 앱 위에 표시’ 권한이 필요합니다.",
                     "‘소리/진동 토글’은 ‘방해 금지 접근’ 권한이 필요합니다.",
                     "‘맨 위로 스크롤’은 현재 화면에서 가장 큰 스크롤 영역을 위로 올립니다.",

@@ -52,6 +52,9 @@ class NotchAccessibilityService : AccessibilityService(), NotchTouchView.Callbac
     /** 편집(내 노치 찾기) 모드 대상 — null 이면 편집 중 아님 */
     private var editTarget: ScreenProfileKey? = null
 
+    /** 디스플레이 관찰 해제 함수 */
+    private var stopObservingDisplay: (() -> Unit)? = null
+
     private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
         handler.post { applyProfile() }
     }
@@ -65,6 +68,14 @@ class NotchAccessibilityService : AccessibilityService(), NotchTouchView.Callbac
         executor = ActionExecutor(this, store)
         vibrator = resolveVibrator()
         store.registerListener(prefListener)
+        // 0°↔180° 회전은 화면 크기가 그대로여서 onConfigurationChanged 가 오지 않는다.
+        // 그런 회전까지 잡으려면 디스플레이 변화를 직접 관찰해야 한다.
+        stopObservingDisplay = ScreenDetector.observeDisplayChanges(this, handler) {
+            handler.post {
+                applyProfile()
+                notifyStateChanged()
+            }
+        }
         store.lastConnectedAt = System.currentTimeMillis()
         ServiceStatusNotifier.cancel(this)
         instance = this
@@ -86,6 +97,8 @@ class NotchAccessibilityService : AccessibilityService(), NotchTouchView.Callbac
     private fun teardown() {
         if (instance === this) instance = null
         if (::store.isInitialized) runCatching { store.unregisterListener(prefListener) }
+        stopObservingDisplay?.invoke()
+        stopObservingDisplay = null
         removeOverlay()
         executor?.release()
         executor = null
@@ -113,6 +126,11 @@ class NotchAccessibilityService : AccessibilityService(), NotchTouchView.Callbac
     private fun applyProfile() {
         if (!::store.isInitialized) return
         val screenKey = currentScreenKey()
+
+        // 이 화면·회전을 처음 쓰는 것이면 실제 노치 위치에 자동으로 맞춘다.
+        // (저장이 일어나면 prefListener 가 applyProfile 을 다시 부른다)
+        if (!store.hasProfile(screenKey) && autoFitToCutout(screenKey)) return
+
         val profile = store.profile(screenKey)
         currentProfile = profile
 

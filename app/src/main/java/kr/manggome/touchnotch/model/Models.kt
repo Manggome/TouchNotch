@@ -1,5 +1,7 @@
 package kr.manggome.touchnotch.model
 
+import android.view.Surface
+
 /** 노치 영역에서 인식하는 제스처 */
 enum class Gesture(val key: String, val label: String) {
     SINGLE_TAP("single_tap", "싱글 터치"),
@@ -39,42 +41,58 @@ enum class FoldState(val key: String, val label: String, val shortLabel: String)
     }
 }
 
-/** 화면 방향 */
-enum class Orientation(val key: String, val label: String, val shortLabel: String) {
-    PORTRAIT("portrait", "세로 모드", "세로"),
-    LANDSCAPE("landscape", "가로 모드", "가로");
+/**
+ * 화면 회전 4방향.
+ *
+ * 노치는 기기에 물리적으로 붙어 있어서 회전할 때마다 화면 좌표계에서 다른 변으로 옮겨간다.
+ * 그래서 가로/세로만 나누면 부족하고, 0°/90°/180°/270° 를 모두 따로 저장해야 한다.
+ *
+ * 어느 회전에서 노치가 어느 변으로 가는지는 기기마다 다를 수 있으므로
+ * 화면에는 각도와 함께 "지금 이 방향" 표시를 띄워, 기기를 돌려가며 맞추게 한다.
+ */
+enum class ScreenRotation(
+    val key: String,
+    val surfaceRotation: Int,
+    val label: String,
+    val shortLabel: String,
+    val isLandscape: Boolean,
+) {
+    ROTATION_0("rot0", Surface.ROTATION_0, "세로 (0°)", "0°", false),
+    ROTATION_90("rot90", Surface.ROTATION_90, "가로 (90°)", "90°", true),
+    ROTATION_180("rot180", Surface.ROTATION_180, "세로 뒤집힘 (180°)", "180°", false),
+    ROTATION_270("rot270", Surface.ROTATION_270, "가로 반대쪽 (270°)", "270°", true);
 
     companion object {
-        fun from(key: String?): Orientation = entries.firstOrNull { it.key == key } ?: PORTRAIT
+        fun from(key: String?): ScreenRotation = entries.firstOrNull { it.key == key } ?: ROTATION_0
+
+        fun fromSurfaceRotation(rotation: Int): ScreenRotation =
+            entries.firstOrNull { it.surfaceRotation == rotation } ?: ROTATION_0
     }
 }
 
 /**
- * 설정을 나누는 기준. 폴드 상태 × 화면 방향 = 4개의 독립 프로필.
- *
- * 노치는 기기에 물리적으로 고정돼 있어서 화면을 돌리면 화면 좌표계에서의 위치가
- * 완전히 달라진다. 그래서 방향별로 크기·위치를 따로 저장해야 한다.
+ * 설정을 나누는 기준. 폴드 상태(2) × 회전(4) = 8개의 독립 프로필.
  */
 data class ScreenProfileKey(
     val fold: FoldState,
-    val orientation: Orientation,
+    val rotation: ScreenRotation,
 ) {
-    val prefix: String get() = "${fold.key}_${orientation.key}"
+    val prefix: String get() = "${fold.key}_${rotation.key}"
 
-    /** "접었을 때 · 세로 모드" */
-    val label: String get() = "${fold.shortLabel} · ${orientation.label}"
+    /** "접었을 때 · 가로 (90°)" */
+    val label: String get() = "${fold.shortLabel} · ${rotation.label}"
 
-    /** "접었을 때 세로" */
-    val shortLabel: String get() = "${fold.shortLabel} ${orientation.shortLabel}"
+    /** "접었을 때 90°" */
+    val shortLabel: String get() = "${fold.shortLabel} ${rotation.shortLabel}"
 
     companion object {
         val ALL: List<ScreenProfileKey> = FoldState.entries.flatMap { fold ->
-            Orientation.entries.map { orientation -> ScreenProfileKey(fold, orientation) }
+            ScreenRotation.entries.map { rotation -> ScreenProfileKey(fold, rotation) }
         }
     }
 }
 
-/** 한 화면 상태(폴드 × 방향)에 대한 전체 설정 */
+/** 한 화면 상태(폴드 × 회전)에 대한 전체 설정 */
 data class NotchProfile(
     val key: ScreenProfileKey,
     val enabled: Boolean,
@@ -82,7 +100,7 @@ data class NotchProfile(
     val heightDp: Int,
     /** -100(왼쪽 끝) ~ 0(중앙) ~ 100(오른쪽 끝) */
     val horizontalPercent: Int,
-    /** 화면 최상단에서의 거리(dp) */
+    /** 화면 최상단에서의 거리(dp). 화면 밖으로 나가는 값은 표시할 때 잘린다 */
     val verticalDp: Int,
     val haptic: Boolean,
     val hapticMs: Int,
@@ -91,6 +109,9 @@ data class NotchProfile(
     fun actionFor(gesture: Gesture): NotchAction = actions[gesture] ?: NotchAction.NONE
 
     companion object {
+        /** 화면 아래쪽에 붙이고 싶을 때 쓰는 값. 표시할 때 화면 높이에 맞춰 잘린다 */
+        const val VERTICAL_BOTTOM = 9_999
+
         /** 제스처 기본 매핑은 폴드 상태에 따라서만 달라진다 */
         private fun defaultActions(fold: FoldState): Map<Gesture, NotchAction> = when (fold) {
             FoldState.FOLDED -> mapOf(
@@ -110,26 +131,38 @@ data class NotchProfile(
             )
         }
 
-        fun default(key: ScreenProfileKey): NotchProfile {
-            // 세로에서는 노치가 화면 위쪽 가로로 눕고, 가로에서는 화면 옆쪽 세로로 선다
-            val (width, height, horizontal, vertical) = when (key.orientation) {
-                Orientation.PORTRAIT -> when (key.fold) {
-                    FoldState.FOLDED -> Geometry(96, 30, 0, 0)
-                    FoldState.UNFOLDED -> Geometry(110, 34, 72, 0)
-                }
-
-                Orientation.LANDSCAPE -> when (key.fold) {
-                    FoldState.FOLDED -> Geometry(30, 96, -100, 60)
-                    FoldState.UNFOLDED -> Geometry(34, 110, -100, 60)
-                }
+        /**
+         * 기본 크기·위치.
+         *
+         * 실제로는 서비스가 이 프로필을 처음 쓸 때 디스플레이 컷아웃을 읽어 자동으로 맞춘다.
+         * 여기 값은 컷아웃이 감지되지 않는 화면(폴드 메인 화면의 언더 디스플레이 카메라 등)에서
+         * 사용자가 끌어서 맞출 때의 출발점이다.
+         */
+        private fun defaultGeometry(key: ScreenProfileKey): Geometry {
+            val long = if (key.fold == FoldState.FOLDED) 96 else 110
+            val short = if (key.fold == FoldState.FOLDED) 30 else 34
+            // 0° 에서 노치가 가로로 치우친 정도 (폴드 메인 화면은 오른쪽 위 카메라)
+            val bias = if (key.fold == FoldState.FOLDED) 0 else 72
+            return when (key.rotation) {
+                // 위쪽 변
+                ScreenRotation.ROTATION_0 -> Geometry(long, short, bias, 0)
+                // 아래쪽 변 (좌우가 뒤집힌다)
+                ScreenRotation.ROTATION_180 -> Geometry(long, short, -bias, VERTICAL_BOTTOM)
+                // 옆쪽 변 — 가로/세로가 바뀌므로 크기를 뒤집는다
+                ScreenRotation.ROTATION_90 -> Geometry(short, long, -100, 0)
+                ScreenRotation.ROTATION_270 -> Geometry(short, long, 100, 0)
             }
+        }
+
+        fun default(key: ScreenProfileKey): NotchProfile {
+            val g = defaultGeometry(key)
             return NotchProfile(
                 key = key,
                 enabled = true,
-                widthDp = width,
-                heightDp = height,
-                horizontalPercent = horizontal,
-                verticalDp = vertical,
+                widthDp = g.widthDp,
+                heightDp = g.heightDp,
+                horizontalPercent = g.horizontalPercent,
+                verticalDp = g.verticalDp,
                 haptic = true,
                 hapticMs = 22,
                 actions = defaultActions(key.fold),
@@ -157,4 +190,21 @@ data class DetectedCutout(
 ) {
     val widthPx: Int get() = rightPx - leftPx
     val heightPx: Int get() = bottomPx - topPx
+
+    /** 노치가 화면의 어느 변에 붙어 있는지 — UI 안내용 */
+    val side: String
+        get() {
+            val centerX = (leftPx + rightPx) / 2f
+            val centerY = (topPx + bottomPx) / 2f
+            val fromLeft = centerX
+            val fromRight = screenWidthPx - centerX
+            val fromTop = centerY
+            val fromBottom = screenHeightPx - centerY
+            return when (minOf(fromLeft, fromRight, fromTop, fromBottom)) {
+                fromTop -> "위쪽"
+                fromBottom -> "아래쪽"
+                fromLeft -> "왼쪽"
+                else -> "오른쪽"
+            }
+        }
 }

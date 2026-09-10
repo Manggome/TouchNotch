@@ -6,12 +6,12 @@ import kr.manggome.touchnotch.model.FoldState
 import kr.manggome.touchnotch.model.Gesture
 import kr.manggome.touchnotch.model.NotchAction
 import kr.manggome.touchnotch.model.NotchProfile
-import kr.manggome.touchnotch.model.Orientation
 import kr.manggome.touchnotch.model.ScreenProfileKey
+import kr.manggome.touchnotch.model.ScreenRotation
 
 /**
  * 설정 저장소. SharedPreferences 하나에 프로필별 접두어로 저장한다.
- * 접두어는 `<폴드상태>_<방향>_` 형태다. (예: `folded_portrait_width`)
+ * 접두어는 `<폴드상태>_<회전>_` 형태다. (예: `folded_rot90_width`)
  *
  * 액티비티에서 값을 바꾸면 접근성 서비스가 리스너로 즉시 반영한다.
  */
@@ -60,6 +60,10 @@ class SettingsStore(context: Context) {
 
     fun resetProfile(key: ScreenProfileKey) = save(NotchProfile.default(key))
 
+    /** 이 프로필이 한 번이라도 저장된 적 있는지 (없으면 서비스가 컷아웃에 자동으로 맞춘다) */
+    fun hasProfile(key: ScreenProfileKey): Boolean =
+        prefs.contains("${key.prefix}_width")
+
     /** 드래그로 위치만 갱신할 때 쓰는 경량 저장 */
     fun savePosition(key: ScreenProfileKey, horizontalPercent: Int, verticalDp: Int) {
         val p = key.prefix
@@ -70,8 +74,8 @@ class SettingsStore(context: Context) {
     }
 
     /**
-     * 한 프로필의 제스처 동작·촉각 피드백을 나머지 세 프로필에 복사한다.
-     * 크기·위치는 화면마다 달라야 하므로 건드리지 않는다.
+     * 한 프로필의 제스처 동작·촉각 피드백을 나머지 프로필 전체에 복사한다.
+     * 크기·위치는 화면·회전마다 달라야 하므로 건드리지 않는다.
      */
     fun copyActionsToOthers(from: ScreenProfileKey) {
         val source = profile(from)
@@ -124,34 +128,84 @@ class SettingsStore(context: Context) {
     // ---------------- 마이그레이션 ----------------
 
     /**
-     * v1 은 폴드 상태만 구분해서 `folded_*` / `unfolded_*` 로 저장했다.
-     * v2 부터 방향까지 나누므로 기존 값을 세로 프로필로 옮긴다.
-     * 가로 프로필에는 크기·위치를 빼고 동작·진동만 물려준다 (화면이 돌아가면 크기가 뒤집히므로).
+     * 저장 스키마 변경 이력.
+     *
+     * v1 — 폴드 상태만 구분: `folded_*`, `unfolded_*`
+     * v2 — 방향 추가: `folded_portrait_*`, `folded_landscape_*`
+     * v3 — 회전 4방향으로 확장: `folded_rot0_*` … `unfolded_rot270_*`
+     *
+     * 회전마다 노치가 화면의 다른 변으로 가므로 크기·위치는 물려줄 수 없다.
+     * 대응되는 회전(세로→0°, 가로→90°)에만 그대로 옮기고, 나머지 회전에는
+     * 동작·진동 설정만 복사한 뒤 크기·위치는 기본값에서 다시 잡게 한다.
      */
     private fun migrateIfNeeded() {
-        if (prefs.getInt(KEY_SCHEMA, 0) >= SCHEMA_VERSION) return
+        var schema = prefs.getInt(KEY_SCHEMA, 0)
+        if (schema >= SCHEMA_VERSION) return
 
+        if (schema < 2) {
+            migrateV1ToV2()
+            schema = 2
+        }
+        if (schema < 3) {
+            migrateV2ToV3()
+            schema = 3
+        }
+        prefs.edit().putInt(KEY_SCHEMA, schema).apply()
+    }
+
+    /** `folded_width` → `folded_portrait_width` */
+    private fun migrateV1ToV2() {
         val snapshot = prefs.all
         val editor = prefs.edit()
-
         for (fold in FoldState.entries) {
             val oldPrefix = "${fold.key}_"
             for ((oldKey, value) in snapshot) {
                 if (!oldKey.startsWith(oldPrefix)) continue
                 val suffix = oldKey.removePrefix(oldPrefix)
-                // 이미 새 형식이면 건너뛴다
-                if (Orientation.entries.any { suffix.startsWith("${it.key}_") }) continue
-
-                put(editor, "${fold.key}_${Orientation.PORTRAIT.key}_$suffix", value)
-                if (suffix == "enabled" || suffix.startsWith("haptic") || suffix.startsWith("action_")) {
-                    put(editor, "${fold.key}_${Orientation.LANDSCAPE.key}_$suffix", value)
+                if (suffix.startsWith("portrait_") || suffix.startsWith("landscape_")) continue
+                put(editor, "${fold.key}_portrait_$suffix", value)
+                if (isSharableSetting(suffix)) {
+                    put(editor, "${fold.key}_landscape_$suffix", value)
                 }
                 editor.remove(oldKey)
             }
         }
-
-        editor.putInt(KEY_SCHEMA, SCHEMA_VERSION).apply()
+        editor.apply()
     }
+
+    /** `folded_portrait_width` → `folded_rot0_width` (가로는 90°로) */
+    private fun migrateV2ToV3() {
+        val snapshot = prefs.all
+        val editor = prefs.edit()
+        val moves = mapOf(
+            "portrait" to ScreenRotation.ROTATION_0,
+            "landscape" to ScreenRotation.ROTATION_90,
+        )
+        for (fold in FoldState.entries) {
+            for ((oldName, rotation) in moves) {
+                val oldPrefix = "${fold.key}_${oldName}_"
+                for ((oldKey, value) in snapshot) {
+                    if (!oldKey.startsWith(oldPrefix)) continue
+                    val suffix = oldKey.removePrefix(oldPrefix)
+                    put(editor, "${fold.key}_${rotation.key}_$suffix", value)
+                    if (isSharableSetting(suffix)) {
+                        // 반대쪽 회전(180°/270°)에는 동작·진동만 물려준다
+                        val counterpart = when (rotation) {
+                            ScreenRotation.ROTATION_0 -> ScreenRotation.ROTATION_180
+                            else -> ScreenRotation.ROTATION_270
+                        }
+                        put(editor, "${fold.key}_${counterpart.key}_$suffix", value)
+                    }
+                    editor.remove(oldKey)
+                }
+            }
+        }
+        editor.apply()
+    }
+
+    /** 크기·위치와 달리 화면 방향에 상관없이 그대로 써도 되는 설정 */
+    private fun isSharableSetting(suffix: String): Boolean =
+        suffix == "enabled" || suffix.startsWith("haptic") || suffix.startsWith("action_")
 
     private fun put(editor: SharedPreferences.Editor, key: String, value: Any?) {
         when (value) {
@@ -167,7 +221,7 @@ class SettingsStore(context: Context) {
     companion object {
         const val PREFS = "touchnotch_settings"
         private const val KEY_SCHEMA = "schema_version"
-        private const val SCHEMA_VERSION = 2
+        private const val SCHEMA_VERSION = 3
         private const val KEY_FOLD_THRESHOLD = "fold_threshold_dp"
         private const val KEY_RECORD_AUDIO = "record_audio"
         private const val KEY_AUTO_UPDATE = "auto_check_update"
