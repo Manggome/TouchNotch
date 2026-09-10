@@ -12,7 +12,9 @@ val versionProps = Properties().apply {
 }
 val baseVersionName: String = versionProps.getProperty("baseVersionName")
 val baseVersionCode: Int = versionProps.getProperty("baseVersionCode").toInt()
-val buildNumber: Int = (System.getenv("GITHUB_RUN_NUMBER") ?: "0").toIntOrNull() ?: 0
+// CI 는 커밋 수를 넘겨준다 (같은 커밋이면 항상 같은 값 → 재실행해도 같은 버전)
+val buildNumber: Int = (System.getenv("TN_BUILD_NUMBER") ?: System.getenv("GITHUB_RUN_NUMBER"))
+    ?.toIntOrNull() ?: 0
 val fullVersionName = "$baseVersionName.$buildNumber"
 
 // ---- 서명 ----

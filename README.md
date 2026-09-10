@@ -104,8 +104,11 @@
 ### 버전
 
 `version.properties` 의 `baseVersionName` 하나만 관리합니다.
-GitHub Actions 는 `baseVersionName.<빌드번호>` 로 버전을 붙여 릴리스를 만듭니다 (예: `1.0.0.7`).
-`versionCode` 는 `baseVersionCode * 1000 + 빌드번호` 로 항상 증가합니다.
+GitHub Actions 는 `baseVersionName.<빌드번호>` 로 버전을 붙여 릴리스를 만듭니다 (예: `1.1.0.7`).
+
+빌드 번호는 **`git rev-list --count HEAD` (커밋 수)** 입니다.
+같은 커밋이면 항상 같은 번호가 나오므로, 워크플로를 재실행해도 새 릴리스가 아니라
+같은 태그를 덮어씁니다. `versionCode` 는 `baseVersionCode * 1000 + 빌드번호` 로 항상 증가합니다.
 
 ### 서명
 

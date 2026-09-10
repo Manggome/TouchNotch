@@ -2,11 +2,16 @@ name: 빌드 및 릴리스
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
   contents: write
+
+# 같은 브랜치에서 두 개가 동시에 돌면 릴리스가 중복 생성된다
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -14,6 +19,9 @@ jobs:
     steps:
       - name: 소스 체크아웃
         uses: actions/checkout@v4
+        with:
+          # 빌드 번호를 커밋 수로 뽑으므로 전체 히스토리가 필요하다
+          fetch-depth: 0
 
       - name: JDK 17 설정
         uses: actions/setup-java@v4
@@ -28,10 +36,15 @@ jobs:
         id: version
         run: |
           BASE=$(grep '^baseVersionName=' version.properties | cut -d= -f2 | tr -d '[:space:]')
-          echo "version=${BASE}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-          echo "tag=v${BASE}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          # 커밋 수는 같은 커밋이면 항상 같은 값이라, 재실행해도 같은 태그로 덮어쓴다
+          BUILD=$(git rev-list --count HEAD)
+          echo "build=${BUILD}" >> "$GITHUB_OUTPUT"
+          echo "version=${BASE}.${BUILD}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${BASE}.${BUILD}" >> "$GITHUB_OUTPUT"
 
       - name: 릴리스 APK 빌드
+        env:
+          TN_BUILD_NUMBER: ${{ steps.version.outputs.build }}
         run: |
           chmod +x ./gradlew
           ./gradlew --no-daemon assembleRelease
