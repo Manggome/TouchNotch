@@ -44,8 +44,8 @@ object ServiceStatusNotifier {
         )
 
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_record)
-            .setContentTitle("액션노치가 꺼져 있어요")
+            .setSmallIcon(R.drawable.ic_notch)
+            .setContentTitle("터치노치가 꺼져 있어요")
             .setContentText("접근성 서비스가 다시 켜지지 않았습니다. 눌러서 켜주세요.")
             .setAutoCancel(true)
             .setContentIntent(openApp)

@@ -187,7 +187,7 @@ fun MainScreen(onRequestRuntimePermissions: () -> Unit) {
         TopAppBar(
             title = {
                 Column {
-                    Text("액션노치", fontWeight = FontWeight.Bold)
+                    Text("터치노치", fontWeight = FontWeight.Bold)
                     Text(
                         "노치 터치로 빠른 동작",
                         style = MaterialTheme.typography.bodySmall,
@@ -575,7 +575,7 @@ private fun ServiceStatusCard(running: Boolean, onOpenSettings: () -> Unit) {
         subtitle = if (running) {
             "노치를 터치해보세요"
         } else {
-            "설정 › 접근성 › 설치된 앱 › 액션노치 를 켜주세요"
+            "설정 › 접근성 › 설치된 앱 › 터치노치 를 켜주세요"
         },
         icon = if (running) Icons.Filled.CheckCircle else Icons.Filled.Warning,
         accent = accent,
